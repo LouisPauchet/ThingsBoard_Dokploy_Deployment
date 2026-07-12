@@ -74,3 +74,11 @@ and MQTTS at `<MQTT_DOMAIN>:8883` with a valid TLS cert issued by Traefik.
   `thingsboard-ce` also joins `dokploy-network`, so Postgres and Kafka are
   unreachable from Traefik or any other app Dokploy manages on the shared
   network.
+- Added a `thingsboard-init` one-shot service that runs `INSTALL_TB=true`
+  against Postgres exactly once. It writes a marker file
+  (`/data/.thingsboard-installed`, on the `thingsboard-install` volume) so
+  re-deploys and restarts never re-run the installer against an
+  already-initialized database. `thingsboard-ce` waits for
+  `thingsboard-init` to exit successfully (`service_completed_successfully`)
+  before starting. Set `LOAD_DEMO=true` in `.env` before the *first* deploy
+  if you want demo data seeded - it has no effect after that first run.
