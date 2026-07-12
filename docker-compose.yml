@@ -4,11 +4,12 @@ services:
     image: "postgres:18"
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres-data:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -40,6 +41,39 @@ services:
     networks:
       - tb-internal
 
+  thingsboard-init:
+    restart: on-failure
+    image: "thingsboard/tb-node:4.3.1.3"
+    # The image runs as the non-root "thingsboard" user, which cannot write
+    # the install marker to the freshly created (root-owned) /data volume.
+    user: root
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        if [ -f /data/.thingsboard-installed ]; then
+          echo "ThingsBoard database already initialized."
+          exit 0
+        fi
+        INSTALL_TB=true LOAD_DEMO=$${LOAD_DEMO:-false} start-tb-node.sh
+        touch /data/.thingsboard-installed
+    environment:
+      TB_SERVICE_ID: tb-ce-node
+      TB_QUEUE_TYPE: in-memory
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      LOAD_DEMO: ${LOAD_DEMO}
+    volumes:
+      - thingsboard-install:/data
+      - thingsboard-logs:/var/log/thingsboard
+    networks:
+      - tb-internal
+
   thingsboard-ce:
     restart: always
     image: "thingsboard/tb-node:4.3.1.3"
@@ -53,15 +87,28 @@ services:
         max-file: "10"
     environment:
       TB_SERVICE_ID: tb-ce-node
+      JAVA_OPTS: ${JAVA_OPTS}
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      SECURITY_CORS_ALLOWED_ORIGINS: ${SECURITY_CORS_ALLOWED_ORIGINS}
       TB_QUEUE_TYPE: kafka
       TB_KAFKA_SERVERS: kafka:9092
+    volumes:
+      - thingsboard-logs:/var/log/thingsboard
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 5 bash -c '</dev/tcp/127.0.0.1/8080'"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 300s
     depends_on:
       postgres:
         condition: service_healthy
       kafka:
         condition: service_started
+      thingsboard-init:
+        condition: service_completed_successfully
     networks:
       - dokploy-network
       - tb-internal
@@ -102,4 +149,10 @@ volumes:
     driver: local
   kafka-data:
     name: tb-ce-kafka-data
+    driver: local
+  thingsboard-install:
+    name: tb-ce-install-marker
+    driver: local
+  thingsboard-logs:
+    name: tb-ce-logs
     driver: local
