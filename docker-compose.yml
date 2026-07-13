@@ -1,7 +1,34 @@
 services:
+  # One-shot job that chowns every named volume to the UID:GID the owning
+  # service will run as. Volumes are created root-owned on first run, and
+  # the services below run as fixed non-root users (8000+), so without this
+  # they would not be able to write to their own data directories.
+  perms-init:
+    image: alpine:3
+    user: root
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        chown -R 8000:8000 /vol/postgres
+        chown -R 8001:8001 /vol/kafka
+        chown -R 8002:8005 /vol/tb-install
+        chown -R 8002:8005 /vol/tb-logs
+        chmod -R g+rwX /vol/tb-install /vol/tb-logs
+    volumes:
+      - postgres-data:/vol/postgres
+      - kafka-data:/vol/kafka
+      - thingsboard-install:/vol/tb-install
+      - thingsboard-logs:/vol/tb-logs
+
   postgres:
     restart: always
     image: "postgres:18"
+    user: "8000:8000"
+    depends_on:
+      perms-init:
+        condition: service_completed_successfully
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -20,6 +47,10 @@ services:
   kafka:
     restart: always
     image: bitnamilegacy/kafka:4.0
+    user: "8001:8001"
+    depends_on:
+      perms-init:
+        condition: service_completed_successfully
     environment:
       ALLOW_PLAINTEXT_LISTENER: "yes"
       KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
@@ -44,10 +75,13 @@ services:
   thingsboard-init:
     restart: on-failure
     image: "thingsboard/tb-node:4.3.1.3"
-    # The image runs as the non-root "thingsboard" user, which cannot write
-    # the install marker to the freshly created (root-owned) /data volume.
-    user: root
+    # perms-init chowns /data and the shared log volume to 8002:8005 up
+    # front, so this no longer needs to run as root to write the install
+    # marker. thingsboard-ce shares group 8005 for the log volume.
+    user: "8002:8005"
     depends_on:
+      perms-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     command:
@@ -77,6 +111,7 @@ services:
   thingsboard-ce:
     restart: always
     image: "thingsboard/tb-node:4.3.1.3"
+    user: "8003:8005"
     expose:
       - "8080"
       - "1883"
@@ -103,6 +138,8 @@ services:
       retries: 10
       start_period: 300s
     depends_on:
+      perms-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       kafka:
