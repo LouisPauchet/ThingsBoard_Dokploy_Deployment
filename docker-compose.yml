@@ -12,7 +12,8 @@ services:
       - |
         set -e
         chown -R 8000:8000 /vol/postgres
-        chown -R 8001:8001 /vol/kafka
+        chown -R 8001:0 /vol/kafka
+        chmod -R g+rwX /vol/kafka
         chown -R 8002:8005 /vol/tb-install
         chown -R 8002:8005 /vol/tb-logs
         chmod -R g+rwX /vol/tb-install /vol/tb-logs
@@ -47,7 +48,10 @@ services:
   kafka:
     restart: always
     image: bitnamilegacy/kafka:4.0
-    user: "8001:8001"
+    # gid 0 (root group) is required, not an arbitrary group: Bitnami images
+    # only pre-grant write access to internal image dirs (e.g.
+    # /opt/bitnami/kafka/config) to group 0, per their "arbitrary UID" support.
+    user: "8001:0"
     depends_on:
       perms-init:
         condition: service_completed_successfully
