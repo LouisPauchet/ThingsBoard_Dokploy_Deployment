@@ -1,35 +1,15 @@
 services:
-  # One-shot job that chowns every named volume to the UID:GID the owning
-  # service will run as. Volumes are created root-owned on first run, and
-  # the services below run as fixed non-root users (8000+), so without this
-  # they would not be able to write to their own data directories.
-  perms-init:
-    image: alpine:3
-    user: root
-    command:
-      - sh
-      - -c
-      - |
-        set -e
-        chown -R 8000:8000 /vol/postgres
-        chown -R 8001:0 /vol/kafka
-        chmod -R g+rwX /vol/kafka
-        chown -R 8002:8005 /vol/tb-install
-        chown -R 8002:8005 /vol/tb-logs
-        chmod -R g+rwX /vol/tb-install /vol/tb-logs
-    volumes:
-      - postgres-data:/vol/postgres
-      - kafka-data:/vol/kafka
-      - thingsboard-install:/vol/tb-install
-      - thingsboard-logs:/vol/tb-logs
-
   postgres:
     restart: always
     image: "postgres:18"
     user: "8000:8000"
-    depends_on:
-      perms-init:
-        condition: service_completed_successfully
+    # Volumes are created root-owned and the services run as fixed non-root
+    # users (8000+), so each service chowns its own volumes in a pre_start
+    # step (an init container that only runs on `compose up`, not on restart).
+    pre_start:
+      - image: alpine:3
+        user: root
+        command: ["sh", "-c", "chown -R 8000:8000 /var/lib/postgresql"]
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -52,9 +32,16 @@ services:
     # only pre-grant write access to internal image dirs (e.g.
     # /opt/bitnami/kafka/config) to group 0, per their "arbitrary UID" support.
     user: "8001:0"
-    depends_on:
-      perms-init:
-        condition: service_completed_successfully
+    pre_start:
+      - image: alpine:3
+        user: root
+        command:
+          - sh
+          - -c
+          - |
+            set -e
+            chown -R 8001:0 /bitnami
+            chmod -R g+rwX /bitnami
     environment:
       ALLOW_PLAINTEXT_LISTENER: "yes"
       KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
@@ -73,42 +60,6 @@ services:
       KAFKA_CFG_SEGMENT_BYTES: "26214400"
     volumes:
       - kafka-data:/bitnami
-    networks:
-      - tb-internal
-
-  thingsboard-init:
-    restart: on-failure
-    image: "thingsboard/tb-node:4.3.1.3"
-    # perms-init chowns /data and the shared log volume to 8002:8005 up
-    # front, so this no longer needs to run as root to write the install
-    # marker. thingsboard-ce shares group 8005 for the log volume.
-    user: "8002:8005"
-    depends_on:
-      perms-init:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-    command:
-      - bash
-      - -c
-      - |
-        set -e
-        if [ -f /data/.thingsboard-installed ]; then
-          echo "ThingsBoard database already initialized."
-          exit 0
-        fi
-        INSTALL_TB=true LOAD_DEMO=$${LOAD_DEMO:-false} start-tb-node.sh
-        touch /data/.thingsboard-installed
-    environment:
-      TB_SERVICE_ID: tb-ce-node
-      TB_QUEUE_TYPE: in-memory
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
-      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
-      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
-      LOAD_DEMO: ${LOAD_DEMO}
-    volumes:
-      - thingsboard-install:/data
-      - thingsboard-logs:/var/log/thingsboard
     networks:
       - tb-internal
 
@@ -133,8 +84,43 @@ services:
       SECURITY_CORS_ALLOWED_ORIGINS: ${SECURITY_CORS_ALLOWED_ORIGINS}
       TB_QUEUE_TYPE: kafka
       TB_KAFKA_SERVERS: kafka:9092
+      LOAD_DEMO: ${LOAD_DEMO}
     volumes:
+      # Mounted only so the pre_start steps below can see it (pre_start steps
+      # share the service's volumes). Holds the install marker.
+      - thingsboard-install:/data
       - thingsboard-logs:/var/log/thingsboard
+    # Init steps run on `compose up` / recreate only, never on a plain
+    # container restart (daemon/host reboot), so a restart can't get stuck
+    # waiting on a one-shot job. Runs after depends_on below is satisfied.
+    pre_start:
+      # Volumes are created root-owned; fix ownership for the fixed UIDs.
+      # thingsboard-ce runs as 8003:8005 and shares group 8005 for logs.
+      - image: alpine:3
+        user: root
+        command:
+          - sh
+          - -c
+          - |
+            set -e
+            chown -R 8002:8005 /data /var/log/thingsboard
+            chmod -R g+rwX /data /var/log/thingsboard
+      # Run the installer once; the marker file makes it idempotent.
+      - user: "8002:8005"
+        environment:
+          TB_QUEUE_TYPE: in-memory
+          JAVA_OPTS: ""
+        command:
+          - bash
+          - -c
+          - |
+            set -e
+            if [ -f /data/.thingsboard-installed ]; then
+              echo "ThingsBoard database already initialized."
+              exit 0
+            fi
+            INSTALL_TB=true LOAD_DEMO=$${LOAD_DEMO:-false} start-tb-node.sh
+            touch /data/.thingsboard-installed
     healthcheck:
       test: ["CMD-SHELL", "timeout 5 bash -c '</dev/tcp/127.0.0.1/8080'"]
       interval: 30s
@@ -142,14 +128,10 @@ services:
       retries: 10
       start_period: 300s
     depends_on:
-      perms-init:
-        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       kafka:
         condition: service_started
-      thingsboard-init:
-        condition: service_completed_successfully
     networks:
       - dokploy-network
       - tb-internal

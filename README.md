@@ -12,7 +12,8 @@ as "Environment Variables" in the Dokploy app UI):
 - `DASHBOARD_DOMAIN` - hostname for the ThingsBoard web UI (e.g. `tb.yourdomain.com`)
 - `MQTT_DOMAIN` - hostname used for MQTTS SNI routing (e.g. `mqtt.yourdomain.com`)
 - `TRAEFIK_CERT_RESOLVER` - the cert resolver name configured in Dokploy's Traefik (default `letsencrypt`)
-- `POSTGRES_DB`, `POSTGRES_PASSWORD` - database secrets
+- `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` - database settings and secrets
+- `LOAD_DEMO`, `JAVA_OPTS`, `SECURITY_CORS_ALLOWED_ORIGINS` - ThingsBoard runtime options (see `.env.example`)
 
 Both `DASHBOARD_DOMAIN` and `MQTT_DOMAIN` need DNS A/AAAA records pointing at
 your Dokploy server.
@@ -74,11 +75,17 @@ and MQTTS at `<MQTT_DOMAIN>:8883` with a valid TLS cert issued by Traefik.
   `thingsboard-ce` also joins `dokploy-network`, so Postgres and Kafka are
   unreachable from Traefik or any other app Dokploy manages on the shared
   network.
-- Added a `thingsboard-init` one-shot service that runs `INSTALL_TB=true`
-  against Postgres exactly once. It writes a marker file
-  (`/data/.thingsboard-installed`, on the `thingsboard-install` volume) so
-  re-deploys and restarts never re-run the installer against an
-  already-initialized database. `thingsboard-ce` waits for
-  `thingsboard-init` to exit successfully (`service_completed_successfully`)
-  before starting. Set `LOAD_DEMO=true` in `.env` before the *first* deploy
-  if you want demo data seeded - it has no effect after that first run.
+- Init work uses Compose [`pre_start`](https://docs.docker.com/reference/compose-file/services/#pre_start)
+  steps instead of one-shot init services. They run on `compose up` /
+  recreate only, so after a Dokploy or host restart the containers simply
+  start (`restart: always`) without waiting for jobs that never re-run.
+  Requires a Docker Compose version that supports `pre_start`.
+  - `postgres`, `kafka` and `thingsboard-ce` each chown their own volumes
+    to their fixed UID:GID (root-owned on first creation).
+  - `thingsboard-ce` then runs `INSTALL_TB=true` against Postgres exactly
+    once. It writes a marker file (`/data/.thingsboard-installed`, on the
+    `thingsboard-install` volume, mounted into `thingsboard-ce` for this
+    purpose) so re-deploys never re-run the installer against an
+    already-initialized database. Set `LOAD_DEMO=true` in `.env` before the
+    *first* deploy if you want demo data seeded - it has no effect after
+    that first run.
