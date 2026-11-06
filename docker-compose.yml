@@ -102,6 +102,14 @@ services:
       KAFKA_CFG_SEGMENT_BYTES: "26214400"
     volumes:
       - kafka-data:/bitnami
+    # The broker listener only opens once Kafka is up (same TCP check as
+    # thingsboard-ce; much lighter than spawning a JVM client every interval).
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 5 bash -c '</dev/tcp/127.0.0.1/9092'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
     networks:
       - tb-internal
     deploy:
