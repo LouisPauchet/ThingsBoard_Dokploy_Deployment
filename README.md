@@ -51,8 +51,9 @@ deploy.
 
 ## 3. Deploy
 
-Deploy this docker-compose stack as a Compose application in Dokploy,
-pointing it at the `dokploy-network` (already external in this file).
+Deploy this file as a **Stack** application in Dokploy (compose type
+"Stack", not "Docker Compose"), using the `dokploy-network` (already external
+in this file).
 ThingsBoard's dashboard will be available at `https://<DASHBOARD_DOMAIN>`
 and MQTTS at `<MQTT_DOMAIN>:8883` with a valid TLS cert issued by Traefik.
 
@@ -75,17 +76,34 @@ and MQTTS at `<MQTT_DOMAIN>:8883` with a valid TLS cert issued by Traefik.
   `thingsboard-ce` also joins `dokploy-network`, so Postgres and Kafka are
   unreachable from Traefik or any other app Dokploy manages on the shared
   network.
-- Init work uses Compose [`pre_start`](https://docs.docker.com/reference/compose-file/services/#pre_start)
-  steps instead of one-shot init services. They run on `compose up` /
-  recreate only, so after a Dokploy or host restart the containers simply
-  start (`restart: always`) without waiting for jobs that never re-run.
-  Requires a Docker Compose version that supports `pre_start`.
-  - `postgres`, `kafka` and `thingsboard-ce` each chown their own volumes
-    to their fixed UID:GID (root-owned on first creation).
-  - `thingsboard-ce` then runs `INSTALL_TB=true` against Postgres exactly
-    once. It writes a marker file (`/data/.thingsboard-installed`, on the
-    `thingsboard-install` volume, mounted into `thingsboard-ce` for this
-    purpose) so re-deploys never re-run the installer against an
-    already-initialized database. Set `LOAD_DEMO=true` in `.env` before the
-    *first* deploy if you want demo data seeded - it has no effect after
-    that first run.
+- Now deployed as a **Swarm stack** (see below) instead of plain Docker
+  Compose, so containers restart correctly after a host reboot.
+  Requires Docker 20.10+ (`replicated-job`).
+  - `volume-init` (one-shot job) chowns the volumes to the fixed UID:GID
+    each service runs as (root-owned on first creation).
+  - `thingsboard-install` (one-shot job) runs `INSTALL_TB=true` against
+    Postgres. It writes a marker file (`/data/.thingsboard-installed`, on the
+    `thingsboard-install` volume) so re-deploys never re-run the installer
+    against an already-initialized database. Set `LOAD_DEMO=true` in `.env`
+    before the *first* deploy if you want demo data seeded - it has no effect
+    after that first run.
+  - `thingsboard-ce` waits for that marker before starting. Swarm has no
+    `depends_on`, so Postgres/Kafka may restart a few times on first boot
+    until `volume-init` has run. This is expected.
+  - Traefik labels moved under `deploy.labels` (Swarm mode), and
+    `tb-internal` is now an `internal` overlay network.
+
+## Why a Swarm stack
+
+`dokploy-network` is a Swarm overlay network. After a reboot Swarm can hand a
+plain compose container's IP to a different task, so compose containers on it
+fail to start and stay down until redeployed
+([Dokploy #5397](https://github.com/Dokploy/dokploy/issues/5397)). Making
+every service a Swarm service avoids mixing the two. Compose's `pre_start`
+isn't available in Swarm, hence the one-shot jobs above.
+
+**Migrating an existing Compose deployment:** in the Dokploy app settings,
+change the compose **Type** from "Docker Compose" to **"Stack"** (no
+environment variable changes needed). Stop/remove the old compose deployment
+first to avoid duplicate containers; the named volumes (`tb-*`) are kept, so
+data is preserved. Then redeploy.
